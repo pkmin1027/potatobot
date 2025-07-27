@@ -10,7 +10,6 @@ import (
 	"syscall"
 	"time"
 
-	// [수정됨] "github.comcom" -> "github.com" 오타 수정
 	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
 	"go.mongodb.org/mongo-driver/bson"
@@ -44,7 +43,6 @@ const (
 	colorYellow = 0xffc107
 	colorGray   = 0x95a5a6
 
-	// 티켓 카테고리 ID
 	openTicketsCategoryID   = "1398719413016072306"
 	closedTicketsCategoryID = "1398719595384406137"
 )
@@ -88,7 +86,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error creating Discord session: %v", err)
 	}
-	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages
+
+	// Server Members Intent를 활성화합니다.
+	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsGuildMembers
+
 	dg.AddHandler(ready)
 	dg.AddHandler(interactionCreate)
 	err = dg.Open()
@@ -133,7 +134,7 @@ func createTicketChannel(s *discordgo.Session, i *discordgo.InteractionCreate, t
 		Name:     channelName,
 		Type:     discordgo.ChannelTypeGuildText,
 		Topic:    fmt.Sprintf("User ID: %s | Ticket ID: %s-%s", i.Member.User.ID, topicValue, ticketNumber),
-		ParentID: openTicketsCategoryID, // 카테고리 지정
+		ParentID: openTicketsCategoryID,
 		PermissionOverwrites: []*discordgo.PermissionOverwrite{
 			{ID: i.GuildID, Type: discordgo.PermissionOverwriteTypeRole, Deny: discordgo.PermissionViewChannel},
 			{ID: i.Member.User.ID, Type: discordgo.PermissionOverwriteTypeMember, Allow: discordgo.PermissionViewChannel | discordgo.PermissionSendMessages},
@@ -146,7 +147,7 @@ func createTicketChannel(s *discordgo.Session, i *discordgo.InteractionCreate, t
 	}
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Embeds: []*discordgo.MessageEmbed{{Title: "티켓 채널 생성 완료", Description: fmt.Sprintf("성공적으로 <#%s> 채널을 생성했습니다.", ch.ID), Color: colorGreen}}, Flags: discordgo.MessageFlagsEphemeral}})
 	messageData := &discordgo.MessageSend{
-		Content: fmt.Sprintf("<@&%s>", supportRoleID),
+		Content: fmt.Sprintf("<@%s>", supportRoleID),
 		Embeds: []*discordgo.MessageEmbed{{
 			Title:       fmt.Sprintf("%s (#%s)", topicValue, ticketNumber),
 			Description: fmt.Sprintf("안녕하세요, <@%s>님! 문의주셔서 감사합니다.\n곧 담당자가 도착할 예정입니다. 잠시만 기다려주십시오.", i.Member.User.ID),
@@ -293,6 +294,7 @@ func handleClaimTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	s.ChannelMessageSendEmbed(i.ChannelID, &discordgo.MessageEmbed{Title: "담당자 배정", Description: fmt.Sprintf("<@%s> 님이 이 티켓의 담당자로 배정되었습니다.", i.Member.User.ID), Color: colorGreen})
 }
 
+// [수정됨] 권한 확인을 s.UserChannelPermissions로 변경
 func handleChangeAssignee(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	targetUser := i.ApplicationCommandData().Options[0].UserValue(s)
 	executor := i.Member
@@ -334,17 +336,19 @@ func handleChangeAssignee(s *discordgo.Session, i *discordgo.InteractionCreate) 
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Embeds: []*discordgo.MessageEmbed{{Title: "권한 없음", Description: "관리자 또는 현재 담당자만 이 명령어를 사용할 수 있습니다.", Color: colorRed}}}})
 		return
 	}
-	canSeeChannel := false
-	for _, po := range ch.PermissionOverwrites {
-		if po.ID == targetUser.ID && (po.Allow&discordgo.PermissionViewChannel) == discordgo.PermissionViewChannel {
-			canSeeChannel = true
-			break
-		}
+
+	// [핵심 수정] s.UserChannelPermissions를 사용하여 디스코드 API에 직접 권한을 문의합니다.
+	perms, err := s.UserChannelPermissions(targetUser.ID, i.ChannelID)
+	if err != nil {
+		log.Printf("Could not get user permissions for channel: %v", err)
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Embeds: []*discordgo.MessageEmbed{{Title: "오류", Description: "대상 사용자의 권한을 확인하는 데 실패했습니다.", Color: colorRed}}}})
+		return
 	}
-	if !canSeeChannel {
+	if (perms & discordgo.PermissionViewChannel) != discordgo.PermissionViewChannel {
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Embeds: []*discordgo.MessageEmbed{{Title: "오류", Description: fmt.Sprintf("%s 님은 이 채널을 볼 수 없어 담당자로 지정할 수 없습니다.", targetUser.Username), Color: colorRed}}}})
 		return
 	}
+
 	originalEmbed := ticketMessage.Embeds[0]
 	assigneeFieldExists := false
 	for _, field := range originalEmbed.Fields {

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,49 +22,54 @@ var (
 	err              error
 	mongoClient      *mongo.Client
 	ticketCollection *mongo.Collection
-	guildID          = "1274752368063414292" // 서버 ID는 여기에 입력하세요.
+	guildID          = "1274752368063414292" // 길드 ID 적용
 
-	// [설정] 카테고리별 지원 역할 ID
-	// 각 티켓 종류(Value)와 담당할 역할의 ID를 짝지어 입력하세요.
+	// 카테고리별 지원 역할 ID 적용
 	categorySupportRoles = map[string]string{
-		"일반민원": "1397231132579467294", // 일반민원 담당 역할 ID
-		"법률구조": "1397231132579467294", // 법률구조 담당 역할 ID
-		"부패신고": "1397981755847217325", // 부패신고 담당 역할 ID
+		"일반민원": "1397231132579467294",
+		"법률구조": "1397231132579467294",
+		"부패신고": "1397981755847217325",
 	}
 
-	// [설정] 기본 지원 역할 ID
-	// 맵에 없는 카테고리가 선택되거나, 다른 명령어에서 사용할 기본 역할 ID
+	// 기본 지원 역할 ID 적용
 	defaultSupportRoleID = "1397231132579467294"
 )
 
+// 임베드에 사용할 색상을 미리 정의합니다.
 const (
 	colorBlue   = 0x0099ff
 	colorGreen  = 0x28a745
 	colorRed    = 0xdc3545
 	colorYellow = 0xffc107
+	colorGray   = 0x95a5a6
 )
 
+// 패널의 드롭다운 메뉴에 표시될 옵션입니다.
 var ticketOptions = []discordgo.SelectMenuOption{
 	{Label: "일반민원", Value: "일반민원", Description: "행정민원, 파산신고, 사업신청은 해당 창구로 문의 바랍니다.", Emoji: &discordgo.ComponentEmoji{Name: "📄"}},
 	{Label: "법률구조", Value: "법률구조", Description: "법률상담은 해당 창구로 문의 바랍니다.", Emoji: &discordgo.ComponentEmoji{Name: "⚖️"}},
 	{Label: "부패신고", Value: "부패신고", Description: "공익신고, 금융신고는 해당 창구로 문의 바랍니다.", Emoji: &discordgo.ComponentEmoji{Name: "🗑️"}},
 }
 
+// MongoDB 카운터 문서의 구조체입니다.
 type counter struct {
 	ID  string `bson:"_id"`
 	Seq uint64 `bson:"seq"`
 }
 
 func main() {
+	// .env 파일에서 환경 변수를 로드합니다.
 	err = godotenv.Load()
 	if err != nil {
 		log.Fatalf("Error loading .env file: %v", err)
 	}
 
+	// .env에서 MongoDB 접속 정보를 가져옵니다.
 	mongoURI := os.Getenv("MONGO_URI")
 	dbName := os.Getenv("MONGO_DATABASE")
 	collectionName := os.Getenv("MONGO_COLLECTION")
 
+	// MongoDB에 연결합니다.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -73,6 +79,7 @@ func main() {
 	}
 	defer mongoClient.Disconnect(ctx)
 
+	// 연결 상태를 확인합니다 (Ping).
 	err = mongoClient.Ping(ctx, nil)
 	if err != nil {
 		log.Fatalf("Failed to ping MongoDB: %v", err)
@@ -81,6 +88,7 @@ func main() {
 
 	ticketCollection = mongoClient.Database(dbName).Collection(collectionName)
 
+	// 디스코드 봇을 설정하고 세션을 생성합니다.
 	token := os.Getenv("BOT_TOKEN")
 	dg, err = discordgo.New("Bot " + token)
 	if err != nil {
@@ -91,12 +99,14 @@ func main() {
 	dg.AddHandler(ready)
 	dg.AddHandler(interactionCreate)
 
+	// 디스코드에 연결합니다.
 	err = dg.Open()
 	if err != nil {
 		log.Fatalf("Error opening connection: %v", err)
 	}
 	defer dg.Close()
 
+	// 슬래시 커맨드를 등록합니다.
 	registerCommands()
 
 	fmt.Println("Bot is now running. Press CTRL+C to exit.")
@@ -105,6 +115,7 @@ func main() {
 	<-sc
 }
 
+// MongoDB에서 다음 티켓 번호를 가져오는 함수입니다.
 func getNextSequenceValue(sequenceName string) (uint64, error) {
 	filter := bson.M{"_id": sequenceName}
 	update := bson.M{"$inc": bson.M{"seq": 1}}
@@ -118,6 +129,7 @@ func getNextSequenceValue(sequenceName string) (uint64, error) {
 	return result.Seq, nil
 }
 
+// 티켓 채널을 생성하는 메인 로직입니다.
 func createTicketChannel(s *discordgo.Session, i *discordgo.InteractionCreate, topicValue string) {
 	nextSeq, err := getNextSequenceValue(topicValue)
 	if err != nil {
@@ -144,7 +156,7 @@ func createTicketChannel(s *discordgo.Session, i *discordgo.InteractionCreate, t
 	ch, err := s.GuildChannelCreateComplex(i.GuildID, discordgo.GuildChannelCreateData{
 		Name:  channelName,
 		Type:  discordgo.ChannelTypeGuildText,
-		Topic: fmt.Sprintf("User: %s | Ticket ID: %s-%s", i.Member.User.Username, topicValue, ticketNumber),
+		Topic: fmt.Sprintf("User ID: %s | Ticket ID: %s-%s", i.Member.User.ID, topicValue, ticketNumber),
 		PermissionOverwrites: []*discordgo.PermissionOverwrite{
 			{ID: i.GuildID, Type: discordgo.PermissionOverwriteTypeRole, Deny: discordgo.PermissionViewChannel},
 			{ID: i.Member.User.ID, Type: discordgo.PermissionOverwriteTypeMember, Allow: discordgo.PermissionViewChannel | discordgo.PermissionSendMessages},
@@ -164,27 +176,40 @@ func createTicketChannel(s *discordgo.Session, i *discordgo.InteractionCreate, t
 		},
 	})
 
-	welcomeEmbed := &discordgo.MessageEmbed{
-		Title:       fmt.Sprintf("%s (#%s)", topicValue, ticketNumber),
-		Description: fmt.Sprintf("안녕하세요, <@%s>님! 문의주셔서 감사합니다.\n담당 직원(<@&%s>)이 곧 내용을 확인할 것입니다.", i.Member.User.ID, supportRoleID),
-		Color:       colorBlue,
-		Timestamp:   time.Now().Format(time.RFC3339),
+	messageData := &discordgo.MessageSend{
+		Content: fmt.Sprintf("<@&%s>", supportRoleID),
+		Embeds: []*discordgo.MessageEmbed{{
+			Title:       fmt.Sprintf("%s (#%s)", topicValue, ticketNumber),
+			Description: fmt.Sprintf("안녕하세요, <@%s>님! 문의주셔서 감사합니다.\n곧 담당자가 도착할 예정입니다. 잠시만 기다려주십시오.", i.Member.User.ID),
+			Color:       colorBlue,
+			Timestamp:   time.Now().Format(time.RFC3339),
+		}},
+		Components: []discordgo.MessageComponent{
+			discordgo.ActionsRow{
+				Components: []discordgo.MessageComponent{
+					discordgo.Button{Label: "티켓 닫기", Style: discordgo.DangerButton, CustomID: "close_ticket_request"},
+					discordgo.Button{Label: "담당자 배정", Style: discordgo.SuccessButton, CustomID: "claim_ticket"},
+				},
+			},
+		},
 	}
-	s.ChannelMessageSendEmbed(ch.ID, welcomeEmbed)
+	s.ChannelMessageSendComplex(ch.ID, messageData)
 }
 
+// 봇이 준비되었을 때 실행되는 함수입니다.
 func ready(s *discordgo.Session, event *discordgo.Ready) {
 	log.Printf("Logged in as: %v#%v", s.State.User.Username, s.State.User.Discriminator)
 }
 
+// [수정됨] 슬래시 커맨드를 한글로 등록합니다.
 func registerCommands() {
 	commands := []*discordgo.ApplicationCommand{
-		{Name: "panel", Description: "티켓 생성 패널을 현재 채널에 보냅니다."},
-		{Name: "close", Description: "현재 티켓 채널을 닫습니다."},
-		{Name: "add", Description: "티켓에 사용자를 추가합니다.", Options: []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionUser, Name: "user", Description: "추가할 사용자", Required: true}}},
-		{Name: "remove", Description: "티켓에서 사용자를 제거합니다.", Options: []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionUser, Name: "user", Description: "제거할 사용자", Required: true}}},
-		{Name: "roleadd", Description: "티켓에 역할을 추가합니다.", Options: []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionRole, Name: "role", Description: "추가할 역할", Required: true}}},
-		{Name: "roleremove", Description: "티켓에서 역할을 제거합니다.", Options: []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionRole, Name: "role", Description: "제거할 역할", Required: true}}},
+		{Name: "패널", Description: "티켓 생성 패널을 현재 채널에 보냅니다."},
+		{Name: "닫기", Description: "현재 티켓 채널을 닫습니다."},
+		{Name: "추가", Description: "티켓에 사용자를 추가합니다.", Options: []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionUser, Name: "user", Description: "추가할 사용자", Required: true}}},
+		{Name: "제거", Description: "티켓에서 사용자를 제거합니다.", Options: []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionUser, Name: "user", Description: "제거할 사용자", Required: true}}},
+		{Name: "역할추가", Description: "티켓에 역할을 추가합니다.", Options: []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionRole, Name: "role", Description: "추가할 역할", Required: true}}},
+		{Name: "역할제거", Description: "티켓에서 역할을 제거합니다.", Options: []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionRole, Name: "role", Description: "제거할 역할", Required: true}}},
 	}
 	for _, v := range commands {
 		_, err := dg.ApplicationCommandCreate(dg.State.User.ID, guildID, v)
@@ -194,6 +219,7 @@ func registerCommands() {
 	}
 }
 
+// 모든 상호작용(커맨드, 버튼, 메뉴)을 받아 분기하는 함수입니다.
 func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	switch i.Type {
 	case discordgo.InteractionApplicationCommand:
@@ -203,24 +229,56 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 }
 
+// [수정됨] 한글 슬래시 커맨드를 처리합니다.
 func handleSlashCommands(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	data := i.ApplicationCommandData()
 	switch data.Name {
-	case "panel":
+	case "패널":
 		sendTicketPanel(s, i)
-	case "close":
+	case "닫기":
 		closeTicket(s, i)
-	case "add":
+	case "추가":
 		addUserToTicket(s, i)
-	case "remove":
+	case "제거":
 		removeUserFromTicket(s, i)
-	case "roleadd":
+	case "역할추가":
 		addRoleToTicket(s, i)
-	case "roleremove":
+	case "역할제거":
 		removeRoleFromTicket(s, i)
 	}
 }
 
+// 메시지 컴포넌트(드롭다운 메뉴, 버튼)를 처리하는 함수입니다.
+func handleMessageComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	data := i.MessageComponentData()
+
+	switch data.CustomID {
+	case "ticket_topic_select":
+		createTicketChannel(s, i, data.Values[0])
+	case "close_ticket_request":
+		handleCloseRequest(s, i)
+	case "confirm_close_ticket":
+		handleConfirmClose(s, i)
+	case "cancel_close_ticket":
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseUpdateMessage})
+		s.ChannelMessageDelete(i.ChannelID, i.Message.ID)
+	case "claim_ticket":
+		handleClaimTicket(s, i)
+	case "reopen_ticket":
+		handleReopenTicket(s, i)
+	case "delete_ticket_permanent":
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Embeds: []*discordgo.MessageEmbed{{Title: "채널 삭제", Description: "5초 후 이 채널을 영구적으로 삭제합니다.", Color: colorRed}},
+			},
+		})
+		time.Sleep(5 * time.Second)
+		s.ChannelDelete(i.ChannelID)
+	}
+}
+
+// /패널 명령어 로직입니다.
 func sendTicketPanel(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -241,39 +299,173 @@ func sendTicketPanel(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	})
 }
 
-func handleMessageComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	data := i.MessageComponentData()
-	if data.CustomID == "ticket_topic_select" {
-		selectedValue := data.Values[0]
-		createTicketChannel(s, i, selectedValue)
-	}
+// /닫기 명령어 또는 '티켓 닫기' 버튼 요청 로직입니다.
+func handleCloseRequest(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Flags: discordgo.MessageFlagsEphemeral, // 사용자에게만 보이도록 설정
+			Embeds: []*discordgo.MessageEmbed{{
+				Title:       "닫기 확인",
+				Description: "정말로 티켓을 닫으시겠습니까?\n닫힌 티켓은 관리자만 다시 열 수 있습니다.",
+				Color:       colorYellow,
+			}},
+			Components: []discordgo.MessageComponent{
+				discordgo.ActionsRow{
+					Components: []discordgo.MessageComponent{
+						discordgo.Button{Label: "닫기 확인", Style: discordgo.DangerButton, CustomID: "confirm_close_ticket"},
+						discordgo.Button{Label: "취소", Style: discordgo.SecondaryButton, CustomID: "cancel_close_ticket"},
+					},
+				},
+			},
+		},
+	})
 }
 
+// '닫기 확인' 버튼 처리 (소프트 종료) 로직입니다.
+func handleConfirmClose(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Embeds:     []*discordgo.MessageEmbed{{Title: "처리 중...", Description: "티켓을 닫고 보관 처리하고 있습니다.", Color: colorGray}},
+			Components: []discordgo.MessageComponent{},
+		},
+	})
+
+	ch, _ := s.Channel(i.ChannelID)
+	userID := getUserIDFromTopic(ch.Topic)
+	if userID == "" {
+		log.Println("Error: Could not find user ID in channel topic.")
+		return
+	}
+
+	// 사용자의 채널 보기 권한을 제거합니다.
+	s.ChannelPermissionSet(ch.ID, userID, discordgo.PermissionOverwriteTypeMember, 0, discordgo.PermissionViewChannel)
+
+	// 관리자 패널을 전송합니다.
+	adminPanel := &discordgo.MessageSend{
+		Embeds: []*discordgo.MessageEmbed{{
+			Title:       "관리자 패널",
+			Description: fmt.Sprintf("<@%s> 님이 티켓을 닫았습니다. 아래 버튼을 사용하여 티켓을 관리하세요.", i.Member.User.ID),
+			Color:       colorGray,
+		}},
+		Components: []discordgo.MessageComponent{
+			discordgo.ActionsRow{
+				Components: []discordgo.MessageComponent{
+					discordgo.Button{Label: "티켓 재오픈", Style: discordgo.SuccessButton, CustomID: "reopen_ticket"},
+					discordgo.Button{Label: "티켓 삭제", Style: discordgo.DangerButton, CustomID: "delete_ticket_permanent"},
+				},
+			},
+		},
+	}
+	s.ChannelMessageSendComplex(ch.ID, adminPanel)
+	// 확인 메시지를 삭제합니다.
+	s.ChannelMessageDelete(i.ChannelID, i.Message.ID)
+}
+
+// '담당자 배정' 버튼 처리 로직입니다.
+func handleClaimTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	originalEmbed := i.Message.Embeds[0]
+
+	for _, field := range originalEmbed.Fields {
+		if field.Name == "담당자" {
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Flags:  discordgo.MessageFlagsEphemeral,
+					Embeds: []*discordgo.MessageEmbed{{Title: "오류", Description: "이미 담당자가 배정된 티켓입니다.", Color: colorRed}},
+				},
+			})
+			return
+		}
+	}
+
+	originalEmbed.Fields = append(originalEmbed.Fields, &discordgo.MessageEmbedField{
+		Name:   "담당자",
+		Value:  i.Member.Mention(),
+		Inline: false,
+	})
+
+	components := i.Message.Components
+	for _, row := range components {
+		if actionsRow, ok := row.(*discordgo.ActionsRow); ok {
+			for j, comp := range actionsRow.Components {
+				if button, ok := comp.(*discordgo.Button); ok {
+					if button.CustomID == "claim_ticket" {
+						button.Disabled = true
+						actionsRow.Components[j] = button
+					}
+				}
+			}
+		}
+	}
+
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Embeds:     []*discordgo.MessageEmbed{originalEmbed},
+			Components: components,
+		},
+	})
+
+	s.ChannelMessageSendEmbed(i.ChannelID, &discordgo.MessageEmbed{
+		Title:       "담당자 배정",
+		Description: fmt.Sprintf("<@%s> 님이 이 티켓의 담당자로 배정되었습니다.", i.Member.User.ID),
+		Color:       colorGreen,
+	})
+}
+
+// '티켓 재오픈' 버튼 처리 로직입니다.
+func handleReopenTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseUpdateMessage})
+
+	ch, _ := s.Channel(i.ChannelID)
+	userID := getUserIDFromTopic(ch.Topic)
+	if userID == "" {
+		log.Println("Error: Could not find user ID in channel topic.")
+		return
+	}
+
+	s.ChannelPermissionSet(ch.ID, userID, discordgo.PermissionOverwriteTypeMember, discordgo.PermissionViewChannel, 0)
+
+	s.ChannelMessageDelete(ch.ID, i.Message.ID)
+
+	s.ChannelMessageSendEmbed(ch.ID, &discordgo.MessageEmbed{
+		Title:       "티켓 재오픈",
+		Description: fmt.Sprintf("<@%s> 님이 티켓을 다시 열었습니다. <@%s>님, 다시 문의를 진행해주세요.", i.Member.User.ID, userID),
+		Color:       colorGreen,
+	})
+}
+
+// 채널 토픽에서 사용자 ID를 파싱하는 헬퍼 함수입니다.
+func getUserIDFromTopic(topic string) string {
+	parts := strings.Split(topic, "|")
+	for _, part := range parts {
+		if strings.Contains(part, "User ID:") {
+			idPart := strings.TrimSpace(strings.TrimPrefix(part, "User ID:"))
+			return idPart
+		}
+	}
+	return ""
+}
+
+// /닫기 명령어 로직은 닫기 요청 플로우를 시작합니다.
 func closeTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	ch, _ := s.Channel(i.ChannelID)
-	if ch.Topic != "" {
+	if ch.Topic == "" {
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
-				Embeds: []*discordgo.MessageEmbed{{Title: "티켓 닫힘", Description: "요청에 따라 티켓을 닫습니다. 이 채널은 잠시 후 삭제됩니다.", Color: colorRed}},
-			},
-		})
-		time.Sleep(5 * time.Second)
-		_, err := s.ChannelDelete(i.ChannelID)
-		if err != nil {
-			log.Printf("Error closing ticket: %v", err)
-		}
-	} else {
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Embeds: []*discordgo.MessageEmbed{{Title: "오류", Description: "이 명령어는 티켓 채널에서만 사용할 수 있습니다.", Color: colorRed}},
 				Flags:  discordgo.MessageFlagsEphemeral,
+				Embeds: []*discordgo.MessageEmbed{{Title: "오류", Description: "이 명령어는 티켓 채널에서만 사용할 수 있습니다.", Color: colorRed}},
 			},
 		})
+		return
 	}
+	handleCloseRequest(s, i)
 }
 
+// /추가 명령어 로직입니다.
 func addUserToTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	user := i.ApplicationCommandData().Options[0].UserValue(s)
 	ch, err := s.Channel(i.ChannelID)
@@ -313,6 +505,7 @@ func addUserToTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	})
 }
 
+// /역할추가 명령어 로직입니다.
 func addRoleToTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	role := i.ApplicationCommandData().Options[0].RoleValue(s, i.GuildID)
 	ch, err := s.Channel(i.ChannelID)
@@ -364,6 +557,7 @@ func addRoleToTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	})
 }
 
+// 설정에 등록된 지원 역할인지 확인하는 헬퍼 함수입니다.
 func isConfiguredSupportRole(roleID string) bool {
 	if roleID == defaultSupportRoleID {
 		return true
@@ -376,6 +570,7 @@ func isConfiguredSupportRole(roleID string) bool {
 	return false
 }
 
+// /제거 명령어 로직입니다.
 func removeUserFromTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	user := i.ApplicationCommandData().Options[0].UserValue(s)
 	err := s.ChannelPermissionDelete(i.ChannelID, user.ID)
@@ -398,6 +593,7 @@ func removeUserFromTicket(s *discordgo.Session, i *discordgo.InteractionCreate) 
 	})
 }
 
+// /역할제거 명령어 로직입니다.
 func removeRoleFromTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	role := i.ApplicationCommandData().Options[0].RoleValue(s, i.GuildID)
 	ch, err := s.Channel(i.ChannelID)

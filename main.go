@@ -79,7 +79,7 @@ func runHealthCheckServer() {
 func main() {
 	err = godotenv.Load()
 	if err != nil {
-		log.Fatalf("Error loading .env file: %v", err)
+		log.Println("Warning: Could not load .env file. Using environment variables from host.")
 	}
 	kstLocation, err = time.LoadLocation("Asia/Seoul")
 	if err != nil {

@@ -1,4 +1,4 @@
-module example.com/v2
+module potatobot
 
 go 1.22
 

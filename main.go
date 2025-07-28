@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"html"
+	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -44,6 +48,7 @@ const (
 
 	openTicketsCategoryID   = "1398719413016072306"
 	closedTicketsCategoryID = "1398719595384406137"
+	logChannelID            = "1397260754482237652"
 )
 
 var ticketOptions = []discordgo.SelectMenuOption{
@@ -62,12 +67,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error loading .env file: %v", err)
 	}
-
 	kstLocation, err = time.LoadLocation("Asia/Seoul")
 	if err != nil {
 		log.Fatalf("Could not load KST location: %v", err)
 	}
-
 	mongoURI := os.Getenv("MONGO_URI")
 	dbName := os.Getenv("MONGO_DATABASE")
 	collectionName := os.Getenv("MONGO_COLLECTION")
@@ -236,11 +239,17 @@ func handleMessageComponent(s *discordgo.Session, i *discordgo.InteractionCreate
 	case "reopen_ticket":
 		handleReopenTicket(s, i)
 	case "delete_ticket_permanent":
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Embeds: []*discordgo.MessageEmbed{{Title: "채널 삭제", Description: "5초 후 이 채널을 영구적으로 삭제합니다.", Color: colorRed}}}})
-		time.Sleep(5 * time.Second)
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Flags:  discordgo.MessageFlagsEphemeral,
+				Embeds: []*discordgo.MessageEmbed{{Title: "처리 중...", Description: "대화록을 생성하고 채널을 삭제합니다.", Color: colorGray}},
+			},
+		})
+		ch, _ := s.Channel(i.ChannelID)
+		createAndSendLog(s, ch)
+		time.Sleep(2 * time.Second)
 		s.ChannelDelete(i.ChannelID)
-	case "create_transcript":
-		handleCreateTranscript(s, i)
 	}
 }
 
@@ -269,7 +278,6 @@ func handleConfirmClose(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 	adminPanel := &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{{Title: "관리자 패널", Description: fmt.Sprintf("<@%s> 님이 티켓을 닫았습니다. 아래 버튼을 사용하여 티켓을 관리하세요.", i.Member.User.ID), Color: colorGray}}, Components: []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{
 		discordgo.Button{Label: "티켓 재오픈", Style: discordgo.SuccessButton, CustomID: "reopen_ticket"},
-		discordgo.Button{Label: "대화록 생성", Style: discordgo.PrimaryButton, CustomID: "create_transcript"},
 		discordgo.Button{Label: "티켓 삭제", Style: discordgo.DangerButton, CustomID: "delete_ticket_permanent"},
 	}}}}
 	s.ChannelMessageSendComplex(ch.ID, adminPanel)
@@ -414,16 +422,14 @@ func handleReopenTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	s.ChannelMessageSendEmbed(ch.ID, &discordgo.MessageEmbed{Title: "티켓 재오픈", Description: fmt.Sprintf("<@%s> 님이 티켓을 다시 열었습니다. <@%s>님, 다시 문의를 진행해주세요.", i.Member.User.ID, userID), Color: colorGreen})
 }
 
-func handleCreateTranscript(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Embeds: []*discordgo.MessageEmbed{{Title: "대화록 생성 중...", Description: "채널의 모든 메시지를 수집하여 HTML 파일로 만들고 있습니다. 잠시만 기다려주세요.", Color: colorBlue}}}})
-	ch, _ := s.Channel(i.ChannelID)
+func createAndSendLog(s *discordgo.Session, channel *discordgo.Channel) {
 	var allMessages []*discordgo.Message
 	var lastMessageID string
+
 	for {
-		messages, err := s.ChannelMessages(i.ChannelID, 100, lastMessageID, "", "")
+		messages, err := s.ChannelMessages(channel.ID, 100, lastMessageID, "", "")
 		if err != nil {
-			log.Printf("Error fetching messages for transcript: %v", err)
-			s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{Flags: discordgo.MessageFlagsEphemeral, Embeds: []*discordgo.MessageEmbed{{Title: "오류", Description: "대화 내용을 불러오는 데 실패했습니다.", Color: colorRed}}})
+			log.Printf("Error fetching messages for log: %v", err)
 			return
 		}
 		if len(messages) == 0 {
@@ -435,28 +441,104 @@ func handleCreateTranscript(s *discordgo.Session, i *discordgo.InteractionCreate
 	for i, j := 0, len(allMessages)-1; i < j; i, j = i+1, j-1 {
 		allMessages[i], allMessages[j] = allMessages[j], allMessages[i]
 	}
-	htmlContent := generateHTML(ch, allMessages)
-	fileName := fmt.Sprintf("transcript-%s.html", ch.Name)
+
+	htmlContent := generateHTML(channel, allMessages)
+	fileName := fmt.Sprintf("transcript-%s.html", channel.Name)
 	err = os.WriteFile(fileName, []byte(htmlContent), 0644)
 	if err != nil {
-		log.Printf("Error writing transcript file: %v", err)
+		log.Printf("Error writing transcript file for log: %v", err)
 		return
 	}
+	defer os.Remove(fileName)
+
 	file, err := os.Open(fileName)
 	if err != nil {
-		log.Printf("Error opening transcript file for sending: %v", err)
+		log.Printf("Error opening transcript file for log: %v", err)
 		return
 	}
 	defer file.Close()
-	defer os.Remove(fileName)
-	messageData := &discordgo.MessageSend{
-		Embeds: []*discordgo.MessageEmbed{{Title: "대화록 생성 완료", Description: "이 티켓의 대화록이 아래 파일로 첨부되었습니다.", Color: colorGreen}},
+
+	guild, _ := s.Guild(guildID)
+	ownerID := getUserIDFromTopic(channel.Topic)
+	ownerMember, _ := s.GuildMember(guildID, ownerID)
+
+	messageCounts := make(map[string]int)
+	participants := make(map[string]*discordgo.User)
+	for _, msg := range allMessages {
+		if _, exists := participants[msg.Author.ID]; !exists {
+			participants[msg.Author.ID] = msg.Author
+		}
+		messageCounts[msg.Author.ID]++
+	}
+
+	type memberStat struct {
+		ID    string
+		Count int
+	}
+	var sortedMembers []memberStat
+	for id, count := range messageCounts {
+		sortedMembers = append(sortedMembers, memberStat{id, count})
+	}
+	sort.Slice(sortedMembers, func(i, j int) bool {
+		return sortedMembers[i].Count > sortedMembers[j].Count
+	})
+
+	var membersBuilder strings.Builder
+	for _, member := range sortedMembers {
+		user := participants[member.ID]
+		membersBuilder.WriteString(fmt.Sprintf("%d - @%s#%s\n", member.Count, user.Username, user.Discriminator))
+	}
+
+	logEmbed := &discordgo.MessageEmbed{
+		Author: &discordgo.MessageEmbedAuthor{
+			Name:    ownerMember.User.Username,
+			IconURL: ownerMember.User.AvatarURL(""),
+		},
+		Color: colorGray,
+		Fields: []*discordgo.MessageEmbedField{
+			{Name: "민원인", Value: ownerMember.Mention(), Inline: true},
+			{Name: "티켓 이름", Value: channel.Name, Inline: true},
+			{Name: "민원 종류", Value: strings.Split(channel.Name, "-")[0], Inline: true},
+			{Name: "대화 기록", Value: "```" + membersBuilder.String() + "```", Inline: false},
+		},
+		Footer: &discordgo.MessageEmbedFooter{
+			Text:    "강원특별자치도청",
+			IconURL: guild.IconURL(""),
+		},
+		Timestamp: time.Now().In(kstLocation).Format(time.RFC3339),
+	}
+
+	logMessage := &discordgo.MessageSend{
+		Embeds: []*discordgo.MessageEmbed{logEmbed},
 		Files:  []*discordgo.File{{Name: fileName, ContentType: "text/html", Reader: file}},
 	}
-	s.ChannelMessageSendComplex(i.ChannelID, messageData)
+	s.ChannelMessageSendComplex(logChannelID, logMessage)
 }
 
-// [수정됨] 봇 메시지 및 임베드, 이미지를 포함하도록 대폭 개선된 함수
+// [신규] 이미지 URL을 Base64로 인코딩하는 헬퍼 함수
+func imageToBase64(url string) string {
+	if url == "" {
+		return ""
+	}
+	resp, err := http.Get(url)
+	if err != nil {
+		log.Printf("Failed to download image for transcript: %v", err)
+		return url // 다운로드 실패 시 원본 URL 반환
+	}
+	defer resp.Body.Close()
+
+	bytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Failed to read image body: %v", err)
+		return url
+	}
+
+	contentType := http.DetectContentType(bytes)
+	base64Str := base64.StdEncoding.EncodeToString(bytes)
+
+	return fmt.Sprintf("data:%s;base64,%s", contentType, base64Str)
+}
+
 func generateHTML(channel *discordgo.Channel, messages []*discordgo.Message) string {
 	var sb strings.Builder
 	sb.WriteString(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Transcript for #` + html.EscapeString(channel.Name) + `</title>`)
@@ -464,44 +546,34 @@ func generateHTML(channel *discordgo.Channel, messages []*discordgo.Message) str
 	sb.WriteString(`</head><body><div class="container"><h1>Transcript for #` + html.EscapeString(channel.Name) + `</h1>`)
 
 	for _, msg := range messages {
-		// 봇 메시지 중 관리자 패널처럼 불필요한 메시지는 건너뛰기
 		if msg.Author.Bot && len(msg.Embeds) > 0 && msg.Embeds[0].Title == "관리자 패널" {
 			continue
 		}
-
-		// 메시지 내용, 첨부파일, 임베드 내용을 모두 담을 빌더
 		var contentBuilder strings.Builder
-
-		// 1. 일반 메시지 내용 처리
 		if msg.Content != "" {
 			contentBuilder.WriteString(fmt.Sprintf("<div>%s</div>", html.EscapeString(msg.Content)))
 		}
-
-		// 2. 첨부 파일 처리 (이미지)
 		for _, attachment := range msg.Attachments {
 			if strings.HasPrefix(attachment.ContentType, "image/") {
-				contentBuilder.WriteString(fmt.Sprintf(`<a href="%s" target="_blank"><img class="attachment-image" src="%s" alt="Attachment"></a>`, attachment.URL, attachment.URL))
+				base64Image := imageToBase64(attachment.URL)
+				contentBuilder.WriteString(fmt.Sprintf(`<a href="%s" target="_blank"><img class="attachment-image" src="%s" alt="Attachment"></a>`, attachment.URL, base64Image))
 			}
 		}
-
-		// 3. 임베드 처리
 		for _, embed := range msg.Embeds {
 			borderColor := fmt.Sprintf("#%06x", embed.Color)
 			if embed.Color == 0 {
 				borderColor = "#4f545c"
-			} // 색상이 없으면 기본색
-
+			}
 			contentBuilder.WriteString(fmt.Sprintf(`<div class="embed" style="border-left-color: %s;">`, borderColor))
-
 			var thumbnailHTML string
 			if embed.Thumbnail != nil {
-				thumbnailHTML = fmt.Sprintf(`<div class="embed-thumbnail"><img src="%s" alt="Thumbnail"></div>`, embed.Thumbnail.URL)
+				base64Thumb := imageToBase64(embed.Thumbnail.URL)
+				thumbnailHTML = fmt.Sprintf(`<div class="embed-thumbnail"><img src="%s" alt="Thumbnail"></div>`, base64Thumb)
 			}
-
 			contentBuilder.WriteString(`<div class="embed-content">`)
-
 			if embed.Author != nil {
-				contentBuilder.WriteString(fmt.Sprintf(`<div class="embed-author"><img class="embed-author-icon" src="%s"><span class="embed-author-name"><a href="%s" target="_blank">%s</a></span></div>`, embed.Author.IconURL, embed.Author.URL, html.EscapeString(embed.Author.Name)))
+				base64AuthorIcon := imageToBase64(embed.Author.IconURL)
+				contentBuilder.WriteString(fmt.Sprintf(`<div class="embed-author"><img class="embed-author-icon" src="%s"><span class="embed-author-name"><a href="%s" target="_blank">%s</a></span></div>`, base64AuthorIcon, embed.Author.URL, html.EscapeString(embed.Author.Name)))
 			}
 			if embed.Title != "" {
 				if embed.URL != "" {
@@ -525,31 +597,28 @@ func generateHTML(channel *discordgo.Channel, messages []*discordgo.Message) str
 				contentBuilder.WriteString(`</div>`)
 			}
 			if embed.Image != nil {
-				contentBuilder.WriteString(fmt.Sprintf(`<div class="embed-image"><a href="%s" target="_blank"><img src="%s" alt="Embed Image"></a></div>`, embed.Image.URL, embed.Image.URL))
+				base64Image := imageToBase64(embed.Image.URL)
+				contentBuilder.WriteString(fmt.Sprintf(`<div class="embed-image"><a href="%s" target="_blank"><img src="%s" alt="Embed Image"></a></div>`, embed.Image.URL, base64Image))
 			}
-
-			contentBuilder.WriteString(`</div>`)      // end embed-content
-			contentBuilder.WriteString(thumbnailHTML) // 썸네일 추가
-
+			contentBuilder.WriteString(`</div>`)
+			contentBuilder.WriteString(thumbnailHTML)
 			if embed.Footer != nil {
 				contentBuilder.WriteString(`<div class="embed-footer">`)
 				if embed.Footer.IconURL != "" {
-					contentBuilder.WriteString(fmt.Sprintf(`<img class="embed-footer-icon" src="%s">`, embed.Footer.IconURL))
+					base64FooterIcon := imageToBase64(embed.Footer.IconURL)
+					contentBuilder.WriteString(fmt.Sprintf(`<img class="embed-footer-icon" src="%s">`, base64FooterIcon))
 				}
 				contentBuilder.WriteString(fmt.Sprintf(`<span class="embed-footer-text">%s</span></div>`, html.EscapeString(embed.Footer.Text)))
 			}
-
-			contentBuilder.WriteString(`</div>`) // end embed
+			contentBuilder.WriteString(`</div>`)
 		}
-
-		// 내용이 있는 경우에만 메시지 블록을 생성
 		if contentBuilder.Len() > 0 {
 			botTag := ""
 			if msg.Author.Bot {
 				botTag = `<span class="bot-tag">BOT</span>`
 			}
 			sb.WriteString(fmt.Sprintf(`<div class="message"><img class="avatar" src="%s"><div class="message-content"><div class="header"><span class="username">%s</span>%s<span class="timestamp">%s</span></div><div class="content">%s</div></div></div>`,
-				msg.Author.AvatarURL(""),
+				imageToBase64(msg.Author.AvatarURL("")),
 				html.EscapeString(msg.Author.Username),
 				botTag,
 				msg.Timestamp.In(kstLocation).Format("2006-01-02 15:04:05"),
@@ -557,7 +626,6 @@ func generateHTML(channel *discordgo.Channel, messages []*discordgo.Message) str
 			))
 		}
 	}
-
 	sb.WriteString(`</div></body></html>`)
 	return sb.String()
 }

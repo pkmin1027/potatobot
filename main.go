@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"html"
 	"log"
 	"os"
 	"os/signal"
@@ -24,18 +25,16 @@ var (
 	ticketCollection *mongo.Collection
 	guildID          = "1274752368063414292" // 길드 ID 적용
 
-	// 카테고리별 지원 역할 ID 적용
+	kstLocation *time.Location
+
 	categorySupportRoles = map[string]string{
 		"일반민원": "1397231132579467294",
 		"법률구조": "1397231132579467294",
 		"부패신고": "1397981755847217325",
 	}
-
-	// 기본 지원 역할 ID 적용
 	defaultSupportRoleID = "1397231132579467294"
 )
 
-// 임베드 및 카테고리 ID를 미리 정의합니다.
 const (
 	colorBlue   = 0x0099ff
 	colorGreen  = 0x28a745
@@ -47,14 +46,12 @@ const (
 	closedTicketsCategoryID = "1398719595384406137"
 )
 
-// 패널의 드롭다운 메뉴에 표시될 옵션입니다.
 var ticketOptions = []discordgo.SelectMenuOption{
 	{Label: "일반민원", Value: "일반민원", Description: "행정민원, 파산신고, 사업신청은 해당 창구로 문의 바랍니다.", Emoji: &discordgo.ComponentEmoji{Name: "📄"}},
 	{Label: "법률구조", Value: "법률구조", Description: "법률상담은 해당 창구로 문의 바랍니다.", Emoji: &discordgo.ComponentEmoji{Name: "⚖️"}},
 	{Label: "부패신고", Value: "부패신고", Description: "공익신고, 금융신고는 해당 창구로 문의 바랍니다.", Emoji: &discordgo.ComponentEmoji{Name: "🗑️"}},
 }
 
-// MongoDB 카운터 문서의 구조체입니다.
 type counter struct {
 	ID  string `bson:"_id"`
 	Seq uint64 `bson:"seq"`
@@ -65,6 +62,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error loading .env file: %v", err)
 	}
+
+	kstLocation, err = time.LoadLocation("Asia/Seoul")
+	if err != nil {
+		log.Fatalf("Could not load KST location: %v", err)
+	}
+
 	mongoURI := os.Getenv("MONGO_URI")
 	dbName := os.Getenv("MONGO_DATABASE")
 	collectionName := os.Getenv("MONGO_COLLECTION")
@@ -87,8 +90,7 @@ func main() {
 		log.Fatalf("Error creating Discord session: %v", err)
 	}
 
-	// Server Members Intent를 활성화합니다.
-	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsGuildMembers
+	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsGuildMembers | discordgo.IntentsMessageContent
 
 	dg.AddHandler(ready)
 	dg.AddHandler(interactionCreate)
@@ -152,7 +154,7 @@ func createTicketChannel(s *discordgo.Session, i *discordgo.InteractionCreate, t
 			Title:       fmt.Sprintf("%s (#%s)", topicValue, ticketNumber),
 			Description: fmt.Sprintf("안녕하세요, <@%s>님! 문의주셔서 감사합니다.\n곧 담당자가 도착할 예정입니다. 잠시만 기다려주십시오.", i.Member.User.ID),
 			Color:       colorBlue,
-			Timestamp:   time.Now().Format(time.RFC3339),
+			Timestamp:   time.Now().In(kstLocation).Format(time.RFC3339),
 		}},
 		Components: []discordgo.MessageComponent{
 			discordgo.ActionsRow{
@@ -237,6 +239,8 @@ func handleMessageComponent(s *discordgo.Session, i *discordgo.InteractionCreate
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Embeds: []*discordgo.MessageEmbed{{Title: "채널 삭제", Description: "5초 후 이 채널을 영구적으로 삭제합니다.", Color: colorRed}}}})
 		time.Sleep(5 * time.Second)
 		s.ChannelDelete(i.ChannelID)
+	case "create_transcript":
+		handleCreateTranscript(s, i)
 	}
 }
 
@@ -263,7 +267,11 @@ func handleConfirmClose(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if err != nil {
 		log.Printf("Error moving channel to closed category: %v", err)
 	}
-	adminPanel := &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{{Title: "관리자 패널", Description: fmt.Sprintf("<@%s> 님이 티켓을 닫았습니다. 아래 버튼을 사용하여 티켓을 관리하세요.", i.Member.User.ID), Color: colorGray}}, Components: []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{discordgo.Button{Label: "티켓 재오픈", Style: discordgo.SuccessButton, CustomID: "reopen_ticket"}, discordgo.Button{Label: "티켓 삭제", Style: discordgo.DangerButton, CustomID: "delete_ticket_permanent"}}}}}
+	adminPanel := &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{{Title: "관리자 패널", Description: fmt.Sprintf("<@%s> 님이 티켓을 닫았습니다. 아래 버튼을 사용하여 티켓을 관리하세요.", i.Member.User.ID), Color: colorGray}}, Components: []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+		discordgo.Button{Label: "티켓 재오픈", Style: discordgo.SuccessButton, CustomID: "reopen_ticket"},
+		discordgo.Button{Label: "대화록 생성", Style: discordgo.PrimaryButton, CustomID: "create_transcript"},
+		discordgo.Button{Label: "티켓 삭제", Style: discordgo.DangerButton, CustomID: "delete_ticket_permanent"},
+	}}}}
 	s.ChannelMessageSendComplex(ch.ID, adminPanel)
 	s.ChannelMessageDelete(i.ChannelID, i.Message.ID)
 }
@@ -294,7 +302,6 @@ func handleClaimTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	s.ChannelMessageSendEmbed(i.ChannelID, &discordgo.MessageEmbed{Title: "담당자 배정", Description: fmt.Sprintf("<@%s> 님이 이 티켓의 담당자로 배정되었습니다.", i.Member.User.ID), Color: colorGreen})
 }
 
-// [수정됨] 권한 확인을 s.UserChannelPermissions로 변경
 func handleChangeAssignee(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	targetUser := i.ApplicationCommandData().Options[0].UserValue(s)
 	executor := i.Member
@@ -336,8 +343,6 @@ func handleChangeAssignee(s *discordgo.Session, i *discordgo.InteractionCreate) 
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Embeds: []*discordgo.MessageEmbed{{Title: "권한 없음", Description: "관리자 또는 현재 담당자만 이 명령어를 사용할 수 있습니다.", Color: colorRed}}}})
 		return
 	}
-
-	// [핵심 수정] s.UserChannelPermissions를 사용하여 디스코드 API에 직접 권한을 문의합니다.
 	perms, err := s.UserChannelPermissions(targetUser.ID, i.ChannelID)
 	if err != nil {
 		log.Printf("Could not get user permissions for channel: %v", err)
@@ -348,7 +353,6 @@ func handleChangeAssignee(s *discordgo.Session, i *discordgo.InteractionCreate) 
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Embeds: []*discordgo.MessageEmbed{{Title: "오류", Description: fmt.Sprintf("%s 님은 이 채널을 볼 수 없어 담당자로 지정할 수 없습니다.", targetUser.Username), Color: colorRed}}}})
 		return
 	}
-
 	originalEmbed := ticketMessage.Embeds[0]
 	assigneeFieldExists := false
 	for _, field := range originalEmbed.Fields {
@@ -408,6 +412,154 @@ func handleReopenTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	s.ChannelPermissionSet(ch.ID, userID, discordgo.PermissionOverwriteTypeMember, discordgo.PermissionViewChannel, 0)
 	s.ChannelMessageDelete(ch.ID, i.Message.ID)
 	s.ChannelMessageSendEmbed(ch.ID, &discordgo.MessageEmbed{Title: "티켓 재오픈", Description: fmt.Sprintf("<@%s> 님이 티켓을 다시 열었습니다. <@%s>님, 다시 문의를 진행해주세요.", i.Member.User.ID, userID), Color: colorGreen})
+}
+
+func handleCreateTranscript(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Embeds: []*discordgo.MessageEmbed{{Title: "대화록 생성 중...", Description: "채널의 모든 메시지를 수집하여 HTML 파일로 만들고 있습니다. 잠시만 기다려주세요.", Color: colorBlue}}}})
+	ch, _ := s.Channel(i.ChannelID)
+	var allMessages []*discordgo.Message
+	var lastMessageID string
+	for {
+		messages, err := s.ChannelMessages(i.ChannelID, 100, lastMessageID, "", "")
+		if err != nil {
+			log.Printf("Error fetching messages for transcript: %v", err)
+			s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{Flags: discordgo.MessageFlagsEphemeral, Embeds: []*discordgo.MessageEmbed{{Title: "오류", Description: "대화 내용을 불러오는 데 실패했습니다.", Color: colorRed}}})
+			return
+		}
+		if len(messages) == 0 {
+			break
+		}
+		allMessages = append(allMessages, messages...)
+		lastMessageID = messages[len(messages)-1].ID
+	}
+	for i, j := 0, len(allMessages)-1; i < j; i, j = i+1, j-1 {
+		allMessages[i], allMessages[j] = allMessages[j], allMessages[i]
+	}
+	htmlContent := generateHTML(ch, allMessages)
+	fileName := fmt.Sprintf("transcript-%s.html", ch.Name)
+	err = os.WriteFile(fileName, []byte(htmlContent), 0644)
+	if err != nil {
+		log.Printf("Error writing transcript file: %v", err)
+		return
+	}
+	file, err := os.Open(fileName)
+	if err != nil {
+		log.Printf("Error opening transcript file for sending: %v", err)
+		return
+	}
+	defer file.Close()
+	defer os.Remove(fileName)
+	messageData := &discordgo.MessageSend{
+		Embeds: []*discordgo.MessageEmbed{{Title: "대화록 생성 완료", Description: "이 티켓의 대화록이 아래 파일로 첨부되었습니다.", Color: colorGreen}},
+		Files:  []*discordgo.File{{Name: fileName, ContentType: "text/html", Reader: file}},
+	}
+	s.ChannelMessageSendComplex(i.ChannelID, messageData)
+}
+
+// [수정됨] 봇 메시지 및 임베드, 이미지를 포함하도록 대폭 개선된 함수
+func generateHTML(channel *discordgo.Channel, messages []*discordgo.Message) string {
+	var sb strings.Builder
+	sb.WriteString(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Transcript for #` + html.EscapeString(channel.Name) + `</title>`)
+	sb.WriteString(`<style>body{background-color:#313338;color:#dcddde;font-family: 'Whitney', 'Helvetica Neue', Helvetica, Arial, sans-serif;}.container{padding:20px;max-width:800px;margin:auto;}.message{display:flex;margin-bottom:20px;}.avatar{width:40px;height:40px;border-radius:50%;margin-right:15px;}.message-content{display:flex;flex-direction:column;}.header{display:flex;align-items:center;margin-bottom:2px;}.username{font-weight:500;color:#fff;}.bot-tag{background-color:#5865f2;color:#fff;font-size:0.65em;padding:2px 4px;border-radius:3px;margin-left:5px;vertical-align:middle;}.timestamp{font-size:0.75em;color:#949ba4;margin-left:10px;}.content{line-height:1.375em;white-space:pre-wrap;}.attachment-image{max-width:400px;max-height:300px;border-radius:5px;margin-top:5px;}.embed{background-color:#2b2d31;border-left:4px solid #4f545c;border-radius:5px;padding:10px;margin-top:5px;display:grid;grid-template-columns:auto 1fr;}.embed-content{grid-column:2/3;}.embed-thumbnail{grid-column:3/4;grid-row:1/5;margin-left:10px;}.embed-thumbnail img{max-width:80px;max-height:80px;border-radius:5px;}.embed-author{display:flex;align-items:center;margin-bottom:5px;font-size:0.875em;}.embed-author-icon{width:24px;height:24px;border-radius:50%;margin-right:8px;}.embed-author-name a{color:#00a8fc;text-decoration:none;font-weight:500;}.embed-title{font-weight:bold;color:#fff;margin-bottom:5px;}.embed-title a{color:#00a8fc;text-decoration:none;}.embed-description{font-size:0.9em;margin-bottom:10px;}.embed-fields{display:flex;flex-wrap:wrap;gap:10px;}.embed-field{min-width:150px;flex-grow:1;}.embed-field-inline{flex-basis:25%;}.embed-field-name{font-weight:bold;margin-bottom:2px;font-size:0.875em;}.embed-field-value{font-size:0.875em;}.embed-image img{max-width:100%;border-radius:5px;margin-top:10px;}.embed-footer{display:flex;align-items:center;font-size:0.75em;margin-top:10px;color:#949ba4;}.embed-footer-icon{width:20px;height:20px;border-radius:50%;margin-right:8px;}</style>`)
+	sb.WriteString(`</head><body><div class="container"><h1>Transcript for #` + html.EscapeString(channel.Name) + `</h1>`)
+
+	for _, msg := range messages {
+		// 봇 메시지 중 관리자 패널처럼 불필요한 메시지는 건너뛰기
+		if msg.Author.Bot && len(msg.Embeds) > 0 && msg.Embeds[0].Title == "관리자 패널" {
+			continue
+		}
+
+		// 메시지 내용, 첨부파일, 임베드 내용을 모두 담을 빌더
+		var contentBuilder strings.Builder
+
+		// 1. 일반 메시지 내용 처리
+		if msg.Content != "" {
+			contentBuilder.WriteString(fmt.Sprintf("<div>%s</div>", html.EscapeString(msg.Content)))
+		}
+
+		// 2. 첨부 파일 처리 (이미지)
+		for _, attachment := range msg.Attachments {
+			if strings.HasPrefix(attachment.ContentType, "image/") {
+				contentBuilder.WriteString(fmt.Sprintf(`<a href="%s" target="_blank"><img class="attachment-image" src="%s" alt="Attachment"></a>`, attachment.URL, attachment.URL))
+			}
+		}
+
+		// 3. 임베드 처리
+		for _, embed := range msg.Embeds {
+			borderColor := fmt.Sprintf("#%06x", embed.Color)
+			if embed.Color == 0 {
+				borderColor = "#4f545c"
+			} // 색상이 없으면 기본색
+
+			contentBuilder.WriteString(fmt.Sprintf(`<div class="embed" style="border-left-color: %s;">`, borderColor))
+
+			var thumbnailHTML string
+			if embed.Thumbnail != nil {
+				thumbnailHTML = fmt.Sprintf(`<div class="embed-thumbnail"><img src="%s" alt="Thumbnail"></div>`, embed.Thumbnail.URL)
+			}
+
+			contentBuilder.WriteString(`<div class="embed-content">`)
+
+			if embed.Author != nil {
+				contentBuilder.WriteString(fmt.Sprintf(`<div class="embed-author"><img class="embed-author-icon" src="%s"><span class="embed-author-name"><a href="%s" target="_blank">%s</a></span></div>`, embed.Author.IconURL, embed.Author.URL, html.EscapeString(embed.Author.Name)))
+			}
+			if embed.Title != "" {
+				if embed.URL != "" {
+					contentBuilder.WriteString(fmt.Sprintf(`<div class="embed-title"><a href="%s" target="_blank">%s</a></div>`, embed.URL, html.EscapeString(embed.Title)))
+				} else {
+					contentBuilder.WriteString(fmt.Sprintf(`<div class="embed-title">%s</div>`, html.EscapeString(embed.Title)))
+				}
+			}
+			if embed.Description != "" {
+				contentBuilder.WriteString(fmt.Sprintf(`<div class="embed-description">%s</div>`, html.EscapeString(embed.Description)))
+			}
+			if len(embed.Fields) > 0 {
+				contentBuilder.WriteString(`<div class="embed-fields">`)
+				for _, field := range embed.Fields {
+					fieldClass := "embed-field"
+					if field.Inline {
+						fieldClass += " embed-field-inline"
+					}
+					contentBuilder.WriteString(fmt.Sprintf(`<div class="%s"><div class="embed-field-name">%s</div><div class="embed-field-value">%s</div></div>`, fieldClass, html.EscapeString(field.Name), html.EscapeString(field.Value)))
+				}
+				contentBuilder.WriteString(`</div>`)
+			}
+			if embed.Image != nil {
+				contentBuilder.WriteString(fmt.Sprintf(`<div class="embed-image"><a href="%s" target="_blank"><img src="%s" alt="Embed Image"></a></div>`, embed.Image.URL, embed.Image.URL))
+			}
+
+			contentBuilder.WriteString(`</div>`)      // end embed-content
+			contentBuilder.WriteString(thumbnailHTML) // 썸네일 추가
+
+			if embed.Footer != nil {
+				contentBuilder.WriteString(`<div class="embed-footer">`)
+				if embed.Footer.IconURL != "" {
+					contentBuilder.WriteString(fmt.Sprintf(`<img class="embed-footer-icon" src="%s">`, embed.Footer.IconURL))
+				}
+				contentBuilder.WriteString(fmt.Sprintf(`<span class="embed-footer-text">%s</span></div>`, html.EscapeString(embed.Footer.Text)))
+			}
+
+			contentBuilder.WriteString(`</div>`) // end embed
+		}
+
+		// 내용이 있는 경우에만 메시지 블록을 생성
+		if contentBuilder.Len() > 0 {
+			botTag := ""
+			if msg.Author.Bot {
+				botTag = `<span class="bot-tag">BOT</span>`
+			}
+			sb.WriteString(fmt.Sprintf(`<div class="message"><img class="avatar" src="%s"><div class="message-content"><div class="header"><span class="username">%s</span>%s<span class="timestamp">%s</span></div><div class="content">%s</div></div></div>`,
+				msg.Author.AvatarURL(""),
+				html.EscapeString(msg.Author.Username),
+				botTag,
+				msg.Timestamp.In(kstLocation).Format("2006-01-02 15:04:05"),
+				contentBuilder.String(),
+			))
+		}
+	}
+
+	sb.WriteString(`</div></body></html>`)
+	return sb.String()
 }
 
 func getUserIDFromTopic(topic string) string {
@@ -528,7 +680,7 @@ func removeRoleFromTicket(s *discordgo.Session, i *discordgo.InteractionCreate) 
 		}
 	}
 	if !hasPermissions {
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Embeds: []*discordgo.MessageEmbed{{Title: "역할 없음", Description: fmt.Sprintf("<@&%s> 역할은 이 티켓에 추가되어 있지 않습니다.", role.ID), Color: colorYellow}}, Flags: discordgo.MessageFlagsEphemeral}})
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Embeds: []*discordgo.MessageEmbed{{Title: "역할 없음", Description: fmt.Sprintf("<@&%s> 역할은 이미 이 티켓에 참여하고 있습니다.", role.ID), Color: colorYellow}}, Flags: discordgo.MessageFlagsEphemeral}})
 		return
 	}
 	err = s.ChannelPermissionDelete(i.ChannelID, role.ID)

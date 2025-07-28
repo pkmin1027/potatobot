@@ -62,6 +62,20 @@ type counter struct {
 	Seq uint64 `bson:"seq"`
 }
 
+func runHealthCheckServer() {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "Bot is running!")
+	})
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8000" // Koyeb의 기본 포트 또는 로컬 테스트용
+	}
+	log.Printf("Health check server starting on port %s", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		log.Fatalf("Failed to start health check server: %v", err)
+	}
+}
+
 func main() {
 	err = godotenv.Load()
 	if err != nil {
@@ -71,6 +85,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("Could not load KST location: %v", err)
 	}
+
+	go runHealthCheckServer()
+
 	mongoURI := os.Getenv("MONGO_URI")
 	dbName := os.Getenv("MONGO_DATABASE")
 	collectionName := os.Getenv("MONGO_COLLECTION")
@@ -152,7 +169,7 @@ func createTicketChannel(s *discordgo.Session, i *discordgo.InteractionCreate, t
 	}
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Embeds: []*discordgo.MessageEmbed{{Title: "티켓 채널 생성 완료", Description: fmt.Sprintf("성공적으로 <#%s> 채널을 생성했습니다.", ch.ID), Color: colorGreen}}, Flags: discordgo.MessageFlagsEphemeral}})
 	messageData := &discordgo.MessageSend{
-		Content: fmt.Sprintf("<@%s>", supportRoleID),
+		Content: fmt.Sprintf("<@&%s>", supportRoleID),
 		Embeds: []*discordgo.MessageEmbed{{
 			Title:       fmt.Sprintf("%s (#%s)", topicValue, ticketNumber),
 			Description: fmt.Sprintf("안녕하세요, <@%s>님! 문의주셔서 감사합니다.\n곧 담당자가 도착할 예정입니다. 잠시만 기다려주십시오.", i.Member.User.ID),
@@ -515,7 +532,6 @@ func createAndSendLog(s *discordgo.Session, channel *discordgo.Channel) {
 	s.ChannelMessageSendComplex(logChannelID, logMessage)
 }
 
-// [신규] 이미지 URL을 Base64로 인코딩하는 헬퍼 함수
 func imageToBase64(url string) string {
 	if url == "" {
 		return ""
@@ -523,7 +539,7 @@ func imageToBase64(url string) string {
 	resp, err := http.Get(url)
 	if err != nil {
 		log.Printf("Failed to download image for transcript: %v", err)
-		return url // 다운로드 실패 시 원본 URL 반환
+		return url
 	}
 	defer resp.Body.Close()
 

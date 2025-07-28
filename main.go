@@ -91,11 +91,14 @@ func main() {
 	mongoURI := os.Getenv("MONGO_URI")
 	dbName := os.Getenv("MONGO_DATABASE")
 	collectionName := os.Getenv("MONGO_COLLECTION")
+
+	log.Printf("Attempting to connect with MONGO_URI: [%s]", mongoURI)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	mongoClient, err = mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
 	if err != nil {
-		log.Fatalf("Failed to connect to MongoDB: %v", err)
+		log.Fatalf("Failed to connect to MongoDB with URI '%s': %v", mongoURI, err)
 	}
 	defer mongoClient.Disconnect(ctx)
 	err = mongoClient.Ping(ctx, nil)

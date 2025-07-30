@@ -302,6 +302,23 @@ func handleConfirmClose(s *discordgo.Session, i *discordgo.InteractionCreate) {
 }
 
 func handleClaimTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// 1. 민원인 본인인지 확인
+	ch, _ := s.Channel(i.ChannelID)
+	ticketOwnerID := getUserIDFromTopic(ch.Topic)
+	clickerID := i.Member.User.ID
+
+	if clickerID == ticketOwnerID {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Flags:  discordgo.MessageFlagsEphemeral,
+				Embeds: []*discordgo.MessageEmbed{{Title: "오류", Description: "티켓을 개설한 본인은 담당자가 될 수 없습니다.", Color: colorRed}},
+			},
+		})
+		return
+	}
+
+	// 2. 지원팀 역할이 있는지 확인
 	isSupportMember := false
 	for _, roleID := range i.Member.Roles {
 		if isConfiguredSupportRole(roleID) {
@@ -309,6 +326,7 @@ func handleClaimTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			break
 		}
 	}
+
 	if !isSupportMember {
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -319,6 +337,8 @@ func handleClaimTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		})
 		return
 	}
+
+	// 3. 기존 담당자 배정 로직
 	originalEmbed := i.Message.Embeds[0]
 	for _, field := range originalEmbed.Fields {
 		if field.Name == "담당자" {

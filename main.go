@@ -138,7 +138,7 @@ func getNextSequenceValue(sequenceName string) (uint64, error) {
 	return result.Seq, nil
 }
 
-func createTicketChannel(s *discordgo.Session, i *discordgo.InteractionCreate, topicValue string) {
+func createTicketChannel(s *discordgo.Session, i *discordgo.InteractionCreate, topicValue, petitionerNickname, petitionContent string) {
 	nextSeq, err := getNextSequenceValue(topicValue)
 	if err != nil {
 		log.Printf("Could not get next sequence for ticket: %v", err)
@@ -165,6 +165,7 @@ func createTicketChannel(s *discordgo.Session, i *discordgo.InteractionCreate, t
 	})
 	if err != nil {
 		log.Printf("Error creating ticket channel: %v", err)
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Embeds: []*discordgo.MessageEmbed{{Title: "오류", Description: fmt.Sprintf("채널 생성에 실패했습니다: %v", err), Color: colorRed}}}})
 		return
 	}
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Embeds: []*discordgo.MessageEmbed{{Title: "티켓 채널 생성 완료", Description: fmt.Sprintf("성공적으로 <#%s> 채널을 생성했습니다.", ch.ID), Color: colorGreen}}, Flags: discordgo.MessageFlagsEphemeral}})
@@ -174,7 +175,11 @@ func createTicketChannel(s *discordgo.Session, i *discordgo.InteractionCreate, t
 			Title:       fmt.Sprintf("%s (#%s)", topicValue, ticketNumber),
 			Description: fmt.Sprintf("안녕하세요, <@%s>님! 문의주셔서 감사합니다.\n곧 담당자가 도착할 예정입니다. 잠시만 기다려주십시오.", i.Member.User.ID),
 			Color:       colorBlue,
-			Timestamp:   time.Now().In(kstLocation).Format(time.RFC3339),
+			Fields: []*discordgo.MessageEmbedField{
+				{Name: "민원인 닉네임", Value: petitionerNickname, Inline: false},
+				{Name: "민원 내용", Value: petitionContent, Inline: false},
+			},
+			Timestamp: time.Now().In(kstLocation).Format(time.RFC3339),
 		}},
 		Components: []discordgo.MessageComponent{
 			discordgo.ActionsRow{
@@ -216,6 +221,8 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		handleSlashCommands(s, i)
 	case discordgo.InteractionMessageComponent:
 		handleMessageComponent(s, i)
+	case discordgo.InteractionModalSubmit:
+		handleModalSubmit(s, i)
 	}
 }
 
@@ -243,7 +250,42 @@ func handleMessageComponent(s *discordgo.Session, i *discordgo.InteractionCreate
 	data := i.MessageComponentData()
 	switch data.CustomID {
 	case "ticket_topic_select":
-		createTicketChannel(s, i, data.Values[0])
+		selectedValue := data.Values[0]
+		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseModal,
+			Data: &discordgo.InteractionResponseData{
+				CustomID: "ticket_modal_submit_" + selectedValue,
+				Title:    "민원인 정보",
+				Components: []discordgo.MessageComponent{
+					discordgo.ActionsRow{
+						Components: []discordgo.MessageComponent{
+							discordgo.TextInput{
+								CustomID:    "nickname",
+								Label:       "민원인 닉네임",
+								Style:       discordgo.TextInputShort,
+								Placeholder: "로블록스 닉네임",
+								Required:    true,
+							},
+						},
+					},
+					discordgo.ActionsRow{
+						Components: []discordgo.MessageComponent{
+							discordgo.TextInput{
+								CustomID:    "content",
+								Label:       "민원 내용",
+								Style:       discordgo.TextInputParagraph,
+								Placeholder: "문의하실 내용을 자세하게 적어주세요.",
+								Required:    true,
+								MaxLength:   4000,
+							},
+						},
+					},
+				},
+			},
+		})
+		if err != nil {
+			log.Printf("Error responding with modal: %v", err)
+		}
 	case "close_ticket_request":
 		handleCloseRequest(s, i)
 	case "confirm_close_ticket":
@@ -268,6 +310,14 @@ func handleMessageComponent(s *discordgo.Session, i *discordgo.InteractionCreate
 		time.Sleep(2 * time.Second)
 		s.ChannelDelete(i.ChannelID)
 	}
+}
+
+func handleModalSubmit(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	data := i.ModalSubmitData()
+	topicValue := strings.TrimPrefix(data.CustomID, "ticket_modal_submit_")
+	nickname := data.Components[0].(*discordgo.ActionsRow).Components[0].(*discordgo.TextInput).Value
+	content := data.Components[1].(*discordgo.ActionsRow).Components[0].(*discordgo.TextInput).Value
+	createTicketChannel(s, i, topicValue, nickname, content)
 }
 
 func sendTicketPanel(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -302,7 +352,6 @@ func handleConfirmClose(s *discordgo.Session, i *discordgo.InteractionCreate) {
 }
 
 func handleClaimTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// 1. 민원인 본인인지 확인
 	ch, _ := s.Channel(i.ChannelID)
 	ticketOwnerID := getUserIDFromTopic(ch.Topic)
 	clickerID := i.Member.User.ID
@@ -318,7 +367,6 @@ func handleClaimTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
-	// 2. 지원팀 역할이 있는지 확인
 	isSupportMember := false
 	for _, roleID := range i.Member.Roles {
 		if isConfiguredSupportRole(roleID) {
@@ -337,8 +385,6 @@ func handleClaimTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		})
 		return
 	}
-
-	// 3. 기존 담당자 배정 로직
 	originalEmbed := i.Message.Embeds[0]
 	for _, field := range originalEmbed.Fields {
 		if field.Name == "담당자" {

@@ -68,7 +68,7 @@ func runHealthCheckServer() {
 	})
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8000" // Koyeb의 기본 포트 또는 로컬 테스트용
+		port = "8000"
 	}
 	log.Printf("Health check server starting on port %s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
@@ -91,9 +91,6 @@ func main() {
 	mongoURI := os.Getenv("MONGO_URI")
 	dbName := os.Getenv("MONGO_DATABASE")
 	collectionName := os.Getenv("MONGO_COLLECTION")
-
-	log.Printf("Attempting to connect with MONGO_URI: [%s]", mongoURI)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	mongoClient, err = mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
@@ -305,6 +302,23 @@ func handleConfirmClose(s *discordgo.Session, i *discordgo.InteractionCreate) {
 }
 
 func handleClaimTicket(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	isSupportMember := false
+	for _, roleID := range i.Member.Roles {
+		if isConfiguredSupportRole(roleID) {
+			isSupportMember = true
+			break
+		}
+	}
+	if !isSupportMember {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Flags:  discordgo.MessageFlagsEphemeral,
+				Embeds: []*discordgo.MessageEmbed{{Title: "권한 없음", Description: "지원팀 역할이 없습니다.", Color: colorRed}},
+			},
+		})
+		return
+	}
 	originalEmbed := i.Message.Embeds[0]
 	for _, field := range originalEmbed.Fields {
 		if field.Name == "담당자" {
